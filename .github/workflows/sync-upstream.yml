@@ -1,0 +1,84 @@
+name: Sync Upstream Smart
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 0 点，北京时间 8 点
+  workflow_dispatch:        # 支持手动运行
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    # 如果你的 qwerwhr/xiugou-tv 不是通过 GitHub Fork 按钮创建的，
+    # 请删除下面这一行，否则任务会被跳过。
+    if: github.event.repository.fork == true
+
+    env:
+      UPSTREAM_REPO: https://github.com/aviamastersgh/mtproto-free-russia.git
+      UPSTREAM_BRANCH: main
+      TARGET_BRANCH: main
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout target branch
+        run: git checkout "$TARGET_BRANCH"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch upstream "$UPSTREAM_BRANCH"
+
+      - name: Decide whether to sync
+        id: decide
+        run: |
+          set -euo pipefail
+
+          # 上游仓库整体文件列表
+          upstream_files=$(git ls-tree -r --name-only "upstream/$UPSTREAM_BRANCH")
+
+          # 统计上游“非 README”文件数量
+          non_readme_total=$(printf '%s\n' "$upstream_files" | awk '
+            tolower($0) !~ /(^|\/)readme(\.md)?$/ && $0 != "" { c++ }
+            END { print c+0 }
+          ')
+
+          # 本次上游相对 Fork 的变更文件
+          changed=$(git diff --name-only "HEAD...upstream/$UPSTREAM_BRANCH" || true)
+
+          # 统计本次“非 README”变更数量
+          non_readme_changed=$(printf '%s\n' "$changed" | awk '
+            tolower($0) !~ /(^|\/)readme(\.md)?$/ && $0 != "" { c++ }
+            END { print c+0 }
+          ')
+
+          echo "上游非 README 文件数: $non_readme_total"
+          echo "本次非 README 变更数: $non_readme_changed"
+
+          if [ "$non_readme_total" -eq 0 ]; then
+            echo "上游仓库只有 README 文件，跳过同步，保留 Fork 现状"
+            echo "sync=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$changed" ]; then
+            echo "没有差异，跳过同步"
+            echo "sync=false" >> "$GITHUB_OUTPUT"
+          elif [ "$non_readme_changed" -eq 0 ]; then
+            echo "本次变更只涉及 README，跳过同步，保留 Fork 现状"
+            echo "sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "存在 README 以外的变更，执行同步"
+            echo "sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream
+        if: steps.decide.outputs.sync == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge "upstream/$UPSTREAM_BRANCH" --no-edit
+          git push origin "HEAD:$TARGET_BRANCH"
